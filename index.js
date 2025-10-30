@@ -212,3 +212,15 @@ async function syncToMongo(contacts) {
 
 // --- Start ---
 // connectDB().then(fetchContacts)
+
+// Solution: Generate an App-Specific Password
+// Step 1: Go to Apple ID Settings
+// Visit: https://appleid.apple.com/
+// Sign in with your Apple ID
+// Go to "Sign-In and Security" section
+// Find "App-Specific Passwords"
+// Step 2: Generate New Password
+// Click "Generate an app-specific password"
+// Enter a label like: Contact Syncer or CardDAV Access
+// Apple will show you a password like: abcd-efgh-ijkl-mnop
+// Copy this password immediately (you can't see it again!)
