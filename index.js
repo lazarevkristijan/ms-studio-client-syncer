@@ -3,6 +3,7 @@ const mongoose = require("mongoose")
 const { createDAVClient } = require("tsdav")
 const cron = require("node-cron")
 const ClientModel = require("./models/Client")
+const SyncLog = require("./models/SyncLog")
 
 // --- Connect to Mongo ---
 async function connectDB() {
@@ -53,11 +54,7 @@ async function fetchContacts() {
 			}
 		}
 
-		const testContacts = contacts.slice(0, 1) // change
-		console.log("🧪 TEST MODE: Only processing first contact")
-		console.log("   Contact:", testContacts)
-
-		await syncToMongo(testContacts)
+		await syncToMongo(contacts)
 		console.log(`✅ Synced ${contacts.length} contacts`)
 	} catch (err) {
 		console.error("❌ Error syncing contacts:", err.message)
@@ -101,6 +98,20 @@ async function syncToMongo(contacts) {
 
 	try {
 		// Step 1: Get all existing contacts in ONE query
+		const uniqueContactsMap = new Map()
+		for (const contact of contacts) {
+			// Keep the first occurrence of each phone number
+			if (!uniqueContactsMap.has(contact.phone)) {
+				uniqueContactsMap.set(contact.phone, contact)
+			}
+		}
+		const uniqueContacts = Array.from(uniqueContactsMap.values())
+
+		console.log(
+			`   📋 Total contacts: ${contacts.length}, Unique: ${uniqueContacts.length}`
+		)
+
+		// Step 1: Get all existing contacts in ONE query
 		const existingContactsMap = new Map(
 			(await ClientModel.find({}, { phone: 1, full_name: 1 }).lean()).map(
 				(c) => [c.phone, c.full_name]
@@ -111,7 +122,7 @@ async function syncToMongo(contacts) {
 		const toInsert = []
 		const toUpdate = []
 
-		for (const contact of contacts) {
+		for (const contact of uniqueContacts) {
 			if (!existingContactsMap.has(contact.phone)) {
 				// New contact
 				toInsert.push({
@@ -140,10 +151,21 @@ async function syncToMongo(contacts) {
 		let updatedCount = 0
 
 		if (toInsert.length > 0) {
-			const result = await ClientModel.insertMany(toInsert, {
-				ordered: false,
-			})
-			insertedCount = result.length
+			try {
+				const result = await ClientModel.insertMany(toInsert, {
+					ordered: false,
+				})
+				insertedCount = result.length
+			} catch (err) {
+				if (err.code === 11000 && err.insertedDocs) {
+					insertedCount = err.insertedDocs.length
+					console.warn(
+						`⚠️ Some duplicates skipped during insert (${insertedCount} succeeded)`
+					)
+				} else {
+					throw err // Re-throw if it's not a duplicate error
+				}
+			}
 		}
 
 		if (toUpdate.length > 0) {
@@ -158,11 +180,29 @@ async function syncToMongo(contacts) {
 				contacts.length - insertedCount - updatedCount
 			}`
 		)
+
+		await SyncLog.create({
+			total_contacts: contacts.length,
+			inserted: insertedCount,
+			updated: updatedCount,
+			skipped: contacts.length - insertedCount - updatedCount,
+			success: true,
+		})
 	} catch (err) {
-		if (err.code === 11000) {
-			console.warn("⚠️ Some duplicate contacts detected, skipping...")
-		} else {
-			console.error("❌ Sync error:", err.message)
+		console.error("❌ Sync error:", err.message)
+
+		// Log the failed sync
+		try {
+			await SyncLog.create({
+				total_contacts: contacts.length,
+				inserted: 0,
+				updated: 0,
+				skipped: 0,
+				success: false,
+				error_message: err.message,
+			})
+		} catch (logErr) {
+			console.error("Failed to log error:", logErr.message)
 		}
 	}
 }
