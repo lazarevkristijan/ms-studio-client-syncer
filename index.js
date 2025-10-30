@@ -207,8 +207,8 @@ async function syncToMongo(contacts) {
 	}
 }
 
-// --- Schedule polling every 120 minutes ---
-cron.schedule("*/120 * * * *", fetchContacts)
+// --- Schedule polling every 180 minutes ---
+// cron.schedule("*/180 * * * *", fetchContacts)
 
 // --- Start ---
-connectDB().then(fetchContacts)
+// connectDB().then(fetchContacts)
