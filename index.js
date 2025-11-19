@@ -208,10 +208,10 @@ async function syncToMongo(contacts) {
 }
 
 // --- Schedule polling every 180 minutes ---
-// cron.schedule("*/180 * * * *", fetchContacts)
+cron.schedule("*/180 * * * *", fetchContacts)
 
 // --- Start ---
-// connectDB().then(fetchContacts)
+connectDB().then(fetchContacts)
 
 // Solution: Generate an App-Specific Password
 // Step 1: Go to Apple ID Settings

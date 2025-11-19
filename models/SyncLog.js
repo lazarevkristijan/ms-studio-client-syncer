@@ -1,5 +1,6 @@
 const mongoose = require("mongoose")
 
+// !!!!modify here and in app
 const syncLogSchema = new mongoose.Schema(
 	{
 		total_contacts: Number,

@@ -1,5 +1,6 @@
 const mongoose = require("mongoose")
 
+// !!!!modify here and in app
 const clientSchema = new mongoose.Schema(
 	{
 		full_name: {
