@@ -2,16 +2,76 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const { createDAVClient } = require("tsdav")
 const cron = require("node-cron")
+const fs = require("fs")
+const path = require("path")
 const ClientModel = require("./models/Client")
 const SyncLog = require("./models/SyncLog")
+
+// --- Logging Utility ---
+const LOG_FILE = path.join(__dirname, "sync.log")
+
+function log(level, message, data = null) {
+	const timestamp = new Date().toISOString()
+	const logLine = `[${timestamp}] [${level}] ${message}${
+		data ? " | " + JSON.stringify(data) : ""
+	}\n`
+
+	// Write to file
+	try {
+		fs.appendFileSync(LOG_FILE, logLine)
+	} catch (err) {
+		console.error("Failed to write to log file:", err.message)
+	}
+
+	// Also log to console
+	const consoleMsg = `[${level}] ${message}`
+	if (level === "ERROR") {
+		console.error(consoleMsg, data || "")
+	} else if (level === "WARN") {
+		console.warn(consoleMsg, data || "")
+	} else {
+		console.log(consoleMsg, data || "")
+	}
+}
+
+// Helper functions for different log levels
+const logger = {
+	info: (msg, data) => log("INFO", msg, data),
+	warn: (msg, data) => log("WARN", msg, data),
+	error: (msg, data) => log("ERROR", msg, data),
+	debug: (msg, data) => log("DEBUG", msg, data),
+}
 
 // --- Connect to Mongo ---
 async function connectDB() {
 	try {
-		await mongoose.connect(process.env.MONGODB_URI)
-		console.log("✅ MongoDB connected")
+		logger.info("Attempting to connect to MongoDB...")
+		await mongoose.connect(process.env.MONGODB_URI, {
+			serverSelectionTimeoutMS: 5000,
+			socketTimeoutMS: 45000,
+		})
+		logger.info("✅ MongoDB connected successfully")
+
+		// Monitor connection health
+		mongoose.connection.on("error", (err) => {
+			logger.error("MongoDB connection error", {
+				error: err.message,
+				stack: err.stack,
+			})
+		})
+
+		mongoose.connection.on("disconnected", () => {
+			logger.warn("⚠️ MongoDB disconnected")
+		})
+
+		mongoose.connection.on("reconnected", () => {
+			logger.info("✅ MongoDB reconnected")
+		})
 	} catch (err) {
-		console.error("❌ MongoDB connection error:", err)
+		logger.error("❌ Failed to connect to MongoDB", {
+			error: err.message,
+			stack: err.stack,
+		})
 		process.exit(1)
 	}
 }
@@ -24,10 +84,16 @@ function normalizePhone(phone) {
 
 // --- Fetch Contacts ---
 async function fetchContacts() {
-	console.log("🔄 Syncing iCloud contacts...")
+	const startTime = Date.now()
+	logger.info("🔄 Starting iCloud contact sync...")
 
 	try {
 		// Create CardDAV client
+		logger.debug("Creating CardDAV client...", {
+			serverUrl: "https://contacts.icloud.com",
+			username: process.env.APPLE_USERNAME ? "✓" : "✗",
+		})
+
 		const client = await createDAVClient({
 			serverUrl: "https://contacts.icloud.com",
 			credentials: {
@@ -37,27 +103,60 @@ async function fetchContacts() {
 			authMethod: "Basic",
 			defaultAccountType: "carddav",
 		})
+		logger.debug("CardDAV client created successfully")
 
 		// Fetch address books
+		logger.debug("Fetching address books...")
 		const addressBooks = await client.fetchAddressBooks()
+		logger.info(`Found ${addressBooks.length} address book(s)`)
 		const contacts = []
 
 		// Fetch all contacts from all address books
-		for (const addressBook of addressBooks) {
+		for (let i = 0; i < addressBooks.length; i++) {
+			const addressBook = addressBooks[i]
+			logger.debug(
+				`Fetching contacts from address book ${i + 1}/${
+					addressBooks.length
+				}...`
+			)
+
 			const vcards = await client.fetchVCards({
 				addressBook: addressBook,
 			})
+			logger.debug(
+				`Fetched ${vcards.length} vCards from address book ${i + 1}`
+			)
 
+			let parsedCount = 0
 			for (const vcard of vcards) {
 				const parsed = parseVCard(vcard.data)
-				if (parsed) contacts.push(parsed)
+				if (parsed) {
+					contacts.push(parsed)
+					parsedCount++
+				}
 			}
+			logger.debug(
+				`Parsed ${parsedCount}/${
+					vcards.length
+				} contacts from address book ${i + 1}`
+			)
 		}
 
+		logger.info(`Total contacts fetched from iCloud: ${contacts.length}`)
 		await syncToMongo(contacts)
-		console.log(`✅ Synced ${contacts.length} contacts`)
+
+		const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+		logger.info(`✅ Sync completed successfully in ${duration}s`, {
+			total_contacts: contacts.length,
+			duration_seconds: duration,
+		})
 	} catch (err) {
-		console.error("❌ Error syncing contacts:", err.message)
+		const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+		logger.error("❌ Error syncing contacts", {
+			error: err.message,
+			stack: err.stack,
+			duration_seconds: duration,
+		})
 	}
 }
 
@@ -94,10 +193,16 @@ function parseVCard(vcardData) {
 
 // --- Sync to MongoDB (OPTIMIZED) ---
 async function syncToMongo(contacts) {
-	if (contacts.length === 0) return
+	if (contacts.length === 0) {
+		logger.warn("No contacts to sync, skipping...")
+		return
+	}
 
 	try {
-		// Step 1: Get all existing contacts in ONE query
+		logger.info("Starting MongoDB sync process...")
+
+		// Step 0: Deduplicate contacts from iCloud
+		logger.debug("Deduplicating contacts...")
 		const uniqueContactsMap = new Map()
 		for (const contact of contacts) {
 			// Keep the first occurrence of each phone number
@@ -106,19 +211,29 @@ async function syncToMongo(contacts) {
 			}
 		}
 		const uniqueContacts = Array.from(uniqueContactsMap.values())
+		const duplicatesRemoved = contacts.length - uniqueContacts.length
 
-		console.log(
-			`   📋 Total contacts: ${contacts.length}, Unique: ${uniqueContacts.length}`
-		)
+		logger.info(`Deduplication complete`, {
+			total: contacts.length,
+			unique: uniqueContacts.length,
+			duplicates_removed: duplicatesRemoved,
+		})
 
 		// Step 1: Get all existing contacts in ONE query
+		logger.debug("Fetching existing contacts from database...")
+		const existingContacts = await ClientModel.find(
+			{},
+			{ phone: 1, full_name: 1 }
+		).lean()
 		const existingContactsMap = new Map(
-			(await ClientModel.find({}, { phone: 1, full_name: 1 }).lean()).map(
-				(c) => [c.phone, c.full_name]
-			)
+			existingContacts.map((c) => [c.phone, c.full_name])
+		)
+		logger.debug(
+			`Found ${existingContacts.length} existing contacts in database`
 		)
 
 		// Step 2: Separate into inserts and updates
+		logger.debug("Comparing contacts to determine changes...")
 		const toInsert = []
 		const toUpdate = []
 
@@ -146,50 +261,77 @@ async function syncToMongo(contacts) {
 			}
 		}
 
+		logger.info(`Change detection complete`, {
+			to_insert: toInsert.length,
+			to_update: toUpdate.length,
+			unchanged:
+				uniqueContacts.length - toInsert.length - toUpdate.length,
+		})
+
 		// Step 3: Execute bulk operations
 		let insertedCount = 0
 		let updatedCount = 0
 
 		if (toInsert.length > 0) {
+			logger.debug(`Inserting ${toInsert.length} new contacts...`)
 			try {
 				const result = await ClientModel.insertMany(toInsert, {
 					ordered: false,
 				})
 				insertedCount = result.length
+				logger.info(`Successfully inserted ${insertedCount} contacts`)
 			} catch (err) {
 				if (err.code === 11000 && err.insertedDocs) {
 					insertedCount = err.insertedDocs.length
-					console.warn(
-						`⚠️ Some duplicates skipped during insert (${insertedCount} succeeded)`
-					)
+					logger.warn(`Some duplicates skipped during insert`, {
+						succeeded: insertedCount,
+						attempted: toInsert.length,
+					})
 				} else {
+					logger.error("Insert operation failed", {
+						error: err.message,
+					})
 					throw err // Re-throw if it's not a duplicate error
 				}
 			}
+		} else {
+			logger.debug("No new contacts to insert")
 		}
 
 		if (toUpdate.length > 0) {
+			logger.debug(`Updating ${toUpdate.length} contacts...`)
 			const result = await ClientModel.bulkWrite(toUpdate, {
 				ordered: false,
 			})
 			updatedCount = result.modifiedCount
+			logger.info(`Successfully updated ${updatedCount} contacts`)
+		} else {
+			logger.debug("No contacts to update")
 		}
 
-		console.log(
-			`   📊 Inserted: ${insertedCount}, Updated: ${updatedCount}, Skipped: ${
-				contacts.length - insertedCount - updatedCount
-			}`
-		)
+		const skipped = uniqueContacts.length - insertedCount - updatedCount
 
-		await SyncLog.create({
-			total_contacts: contacts.length,
+		logger.info(`📊 Sync summary`, {
 			inserted: insertedCount,
 			updated: updatedCount,
-			skipped: contacts.length - insertedCount - updatedCount,
+			skipped: skipped,
+			total: uniqueContacts.length,
+		})
+
+		logger.debug("Saving sync log to database...")
+		await SyncLog.create({
+			total_contacts: uniqueContacts.length,
+			inserted: insertedCount,
+			updated: updatedCount,
+			skipped: skipped,
 			success: true,
 		})
+		logger.debug("Sync log saved successfully")
 	} catch (err) {
-		console.error("❌ Sync error:", err.message)
+		logger.error("❌ Sync to MongoDB failed", {
+			error: err.message,
+			stack: err.stack,
+		})
 
 		// Log the failed sync
 		try {
@@ -201,26 +343,96 @@ async function syncToMongo(contacts) {
 				success: false,
 				error_message: err.message,
 			})
+			logger.debug("Error logged to SyncLog")
 		} catch (logErr) {
-			console.error("Failed to log error:", logErr.message)
+			logger.error("Failed to save error to SyncLog", {
+				error: logErr.message,
+			})
 		}
+
+		// Re-throw to be caught by fetchContacts
+		throw err
 	}
 }
 
-// --- Schedule polling every 180 minutes ---
-cron.schedule("*/180 * * * *", fetchContacts)
+// --- Global Error Handlers ---
+process.on("uncaughtException", (err) => {
+	logger.error("💥 UNCAUGHT EXCEPTION - Process will continue", {
+		error: err.message,
+		stack: err.stack,
+	})
+	// Don't exit - keep cron running
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+	logger.error("💥 UNHANDLED REJECTION - Process will continue", {
+		reason: reason,
+		promise: promise,
+	})
+	// Don't exit - keep cron running
+})
+
+// Graceful shutdown on SIGTERM
+process.on("SIGTERM", () => {
+	logger.info("👋 SIGTERM received, closing gracefully")
+	mongoose.connection.close()
+	process.exit(0)
+})
+
+// Graceful shutdown on SIGINT (Ctrl+C)
+process.on("SIGINT", () => {
+	logger.info("👋 SIGINT received, closing gracefully")
+	mongoose.connection.close()
+	process.exit(0)
+})
+
+// --- Schedule polling every 3 hours ---
+const CRON_SCHEDULE = "0 */3 * * *" // At minute 0 of every 3rd hour
+logger.info(`Setting up cron schedule: ${CRON_SCHEDULE}`)
+
+cron.schedule(CRON_SCHEDULE, () => {
+	const triggerTime = new Date().toISOString()
+	logger.info(`⏰ CRON TRIGGERED at ${triggerTime}`)
+
+	fetchContacts().catch((err) => {
+		logger.error("Cron job failed", {
+			error: err.message,
+			stack: err.stack,
+		})
+	})
+})
+
+logger.info("✅ Cron job scheduled successfully")
+logger.info(
+	"Schedule: Every 3 hours at minute 0 (12am, 3am, 6am, 9am, 12pm, 3pm, 6pm, 9pm)"
+)
 
 // --- Start ---
-connectDB().then(fetchContacts)
+logger.info("=".repeat(60))
+logger.info("🚀 Contact Syncer Application Starting...")
+logger.info("=".repeat(60))
+logger.info(`Node version: ${process.version}`)
+logger.info(`Platform: ${process.platform}`)
+logger.info(`Working directory: ${process.cwd()}`)
+logger.info(`Log file: ${LOG_FILE}`)
 
-// Solution: Generate an App-Specific Password
-// Step 1: Go to Apple ID Settings
-// Visit: https://appleid.apple.com/
-// Sign in with your Apple ID
-// Go to "Sign-In and Security" section
-// Find "App-Specific Passwords"
-// Step 2: Generate New Password
-// Click "Generate an app-specific password"
-// Enter a label like: Contact Syncer or CardDAV Access
-// Apple will show you a password like: abcd-efgh-ijkl-mnop
-// Copy this password immediately (you can't see it again!)
+connectDB()
+	.then(() => {
+		logger.info("✅ Database connected, running initial sync...")
+		return fetchContacts()
+	})
+	.then(() => {
+		logger.info("✅ Initial sync completed successfully")
+		const nextRun = new Date(Date.now() + 3 * 60 * 60 * 1000)
+		logger.info(`⏰ Next scheduled run: ${nextRun.toISOString()}`)
+		logger.info(
+			"Application is now running and waiting for cron triggers..."
+		)
+	})
+	.catch((err) => {
+		logger.error("❌ Failed to start application", {
+			error: err.message,
+			stack: err.stack,
+		})
+		process.exit(1)
+	})
