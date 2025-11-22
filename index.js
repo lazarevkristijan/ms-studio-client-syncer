@@ -1,7 +1,6 @@
 require("dotenv").config()
 const mongoose = require("mongoose")
 const { createDAVClient } = require("tsdav")
-const cron = require("node-cron")
 const fs = require("fs")
 const path = require("path")
 const ClientModel = require("./models/Client")
@@ -386,53 +385,44 @@ process.on("SIGINT", () => {
 	process.exit(0)
 })
 
-// --- Schedule polling every 3 hours ---
-const CRON_SCHEDULE = "0 */3 * * *" // At minute 0 of every 3rd hour
-logger.info(`Setting up cron schedule: ${CRON_SCHEDULE}`)
+// --- Main Execution Function ---
+async function main() {
+	try {
+		logger.info("=".repeat(60))
+		logger.info("🚀 Contact Sync Job Starting...")
+		logger.info("=".repeat(60))
+		logger.info(`Node version: ${process.version}`)
+		logger.info(`Platform: ${process.platform}`)
+		logger.info(`Working directory: ${process.cwd()}`)
+		logger.info(`Log file: ${LOG_FILE}`)
 
-cron.schedule(CRON_SCHEDULE, () => {
-	const triggerTime = new Date().toISOString()
-	logger.info(`⏰ CRON TRIGGERED at ${triggerTime}`)
+		await connectDB()
+		logger.info("✅ Database connected, starting sync...")
 
-	fetchContacts().catch((err) => {
-		logger.error("Cron job failed", {
+		await fetchContacts()
+		logger.info("✅ Sync completed successfully")
+
+		await mongoose.connection.close()
+		logger.info("👋 Database connection closed")
+
+		process.exit(0)
+	} catch (err) {
+		logger.error("❌ Sync job failed", {
 			error: err.message,
 			stack: err.stack,
 		})
-	})
-})
 
-logger.info("✅ Cron job scheduled successfully")
-logger.info(
-	"Schedule: Every 3 hours at minute 0 (12am, 3am, 6am, 9am, 12pm, 3pm, 6pm, 9pm)"
-)
+		try {
+			await mongoose.connection.close()
+		} catch (closeErr) {
+			logger.error("Failed to close database connection", {
+				error: closeErr.message,
+			})
+		}
 
-// --- Start ---
-logger.info("=".repeat(60))
-logger.info("🚀 Contact Syncer Application Starting...")
-logger.info("=".repeat(60))
-logger.info(`Node version: ${process.version}`)
-logger.info(`Platform: ${process.platform}`)
-logger.info(`Working directory: ${process.cwd()}`)
-logger.info(`Log file: ${LOG_FILE}`)
-
-connectDB()
-	.then(() => {
-		logger.info("✅ Database connected, running initial sync...")
-		return fetchContacts()
-	})
-	.then(() => {
-		logger.info("✅ Initial sync completed successfully")
-		const nextRun = new Date(Date.now() + 3 * 60 * 60 * 1000)
-		logger.info(`⏰ Next scheduled run: ${nextRun.toISOString()}`)
-		logger.info(
-			"Application is now running and waiting for cron triggers..."
-		)
-	})
-	.catch((err) => {
-		logger.error("❌ Failed to start application", {
-			error: err.message,
-			stack: err.stack,
-		})
 		process.exit(1)
-	})
+	}
+}
+
+// --- Start Execution ---
+main()
