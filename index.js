@@ -44,7 +44,6 @@ const logger = {
 // --- Connect to Mongo ---
 async function connectDB() {
 	try {
-		logger.info("Attempting to connect to MongoDB...")
 		await mongoose.connect(process.env.MONGODB_URI, {
 			serverSelectionTimeoutMS: 5000,
 			socketTimeoutMS: 45000,
@@ -88,11 +87,6 @@ async function fetchContacts() {
 
 	try {
 		// Create CardDAV client
-		logger.debug("Creating CardDAV client...", {
-			serverUrl: "https://contacts.icloud.com",
-			username: process.env.APPLE_USERNAME ? "✓" : "✗",
-		})
-
 		const client = await createDAVClient({
 			serverUrl: "https://contacts.icloud.com",
 			credentials: {
@@ -102,43 +96,25 @@ async function fetchContacts() {
 			authMethod: "Basic",
 			defaultAccountType: "carddav",
 		})
-		logger.debug("CardDAV client created successfully")
 
 		// Fetch address books
-		logger.debug("Fetching address books...")
 		const addressBooks = await client.fetchAddressBooks()
-		logger.info(`Found ${addressBooks.length} address book(s)`)
 		const contacts = []
 
 		// Fetch all contacts from all address books
 		for (let i = 0; i < addressBooks.length; i++) {
 			const addressBook = addressBooks[i]
-			logger.debug(
-				`Fetching contacts from address book ${i + 1}/${
-					addressBooks.length
-				}...`
-			)
 
 			const vcards = await client.fetchVCards({
 				addressBook: addressBook,
 			})
-			logger.debug(
-				`Fetched ${vcards.length} vCards from address book ${i + 1}`
-			)
 
-			let parsedCount = 0
 			for (const vcard of vcards) {
 				const parsed = parseVCard(vcard.data)
 				if (parsed) {
 					contacts.push(parsed)
-					parsedCount++
 				}
 			}
-			logger.debug(
-				`Parsed ${parsedCount}/${
-					vcards.length
-				} contacts from address book ${i + 1}`
-			)
 		}
 
 		logger.info(`Total contacts fetched from iCloud: ${contacts.length}`)
@@ -198,10 +174,7 @@ async function syncToMongo(contacts) {
 	}
 
 	try {
-		logger.info("Starting MongoDB sync process...")
-
 		// Step 0: Deduplicate contacts from iCloud
-		logger.debug("Deduplicating contacts...")
 		const uniqueContactsMap = new Map()
 		for (const contact of contacts) {
 			// Keep the first occurrence of each phone number
@@ -219,7 +192,6 @@ async function syncToMongo(contacts) {
 		})
 
 		// Step 1: Get all existing contacts in ONE query
-		logger.debug("Fetching existing contacts from database...")
 		const existingContacts = await ClientModel.find(
 			{},
 			{ phone: 1, full_name: 1 }
@@ -227,12 +199,8 @@ async function syncToMongo(contacts) {
 		const existingContactsMap = new Map(
 			existingContacts.map((c) => [c.phone, c.full_name])
 		)
-		logger.debug(
-			`Found ${existingContacts.length} existing contacts in database`
-		)
 
 		// Step 2: Separate into inserts and updates
-		logger.debug("Comparing contacts to determine changes...")
 		const toInsert = []
 		const toUpdate = []
 
@@ -272,7 +240,6 @@ async function syncToMongo(contacts) {
 		let updatedCount = 0
 
 		if (toInsert.length > 0) {
-			logger.debug(`Inserting ${toInsert.length} new contacts...`)
 			try {
 				const result = await ClientModel.insertMany(toInsert, {
 					ordered: false,
@@ -293,19 +260,14 @@ async function syncToMongo(contacts) {
 					throw err // Re-throw if it's not a duplicate error
 				}
 			}
-		} else {
-			logger.debug("No new contacts to insert")
 		}
 
 		if (toUpdate.length > 0) {
-			logger.debug(`Updating ${toUpdate.length} contacts...`)
 			const result = await ClientModel.bulkWrite(toUpdate, {
 				ordered: false,
 			})
 			updatedCount = result.modifiedCount
 			logger.info(`Successfully updated ${updatedCount} contacts`)
-		} else {
-			logger.debug("No contacts to update")
 		}
 
 		const skipped = uniqueContacts.length - insertedCount - updatedCount
@@ -317,7 +279,6 @@ async function syncToMongo(contacts) {
 			total: uniqueContacts.length,
 		})
 
-		logger.debug("Saving sync log to database...")
 		await SyncLog.create({
 			total_contacts: uniqueContacts.length,
 			inserted: insertedCount,
@@ -325,7 +286,6 @@ async function syncToMongo(contacts) {
 			skipped: skipped,
 			success: true,
 		})
-		logger.debug("Sync log saved successfully")
 	} catch (err) {
 		logger.error("❌ Sync to MongoDB failed", {
 			error: err.message,
@@ -342,7 +302,6 @@ async function syncToMongo(contacts) {
 				success: false,
 				error_message: err.message,
 			})
-			logger.debug("Error logged to SyncLog")
 		} catch (logErr) {
 			logger.error("Failed to save error to SyncLog", {
 				error: logErr.message,
@@ -388,19 +347,11 @@ process.on("SIGINT", () => {
 // --- Main Execution Function ---
 async function main() {
 	try {
-		logger.info("=".repeat(60))
 		logger.info("🚀 Contact Sync Job Starting...")
-		logger.info("=".repeat(60))
-		logger.info(`Node version: ${process.version}`)
-		logger.info(`Platform: ${process.platform}`)
-		logger.info(`Working directory: ${process.cwd()}`)
-		logger.info(`Log file: ${LOG_FILE}`)
 
 		await connectDB()
-		logger.info("✅ Database connected, starting sync...")
 
 		await fetchContacts()
-		logger.info("✅ Sync completed successfully")
 
 		await mongoose.connection.close()
 		logger.info("👋 Database connection closed")
