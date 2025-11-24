@@ -6,6 +6,55 @@ const path = require("path")
 const ClientModel = require("./models/Client")
 const SyncLog = require("./models/SyncLog")
 
+// --- Parse command line arguments ---
+const args = process.argv.slice(2)
+const providerArg = args.find((arg) => arg.startsWith("--provider="))
+const PROVIDER = providerArg ? providerArg.split("=")[1] : "invalid" // default to invalid
+
+// Validate provider
+if (!["apple", "google"].includes(PROVIDER)) {
+	console.error(
+		"❌ Invalid provider. Use --provider=apple or --provider=google"
+	)
+	process.exit(1)
+}
+
+// --- Load provider-specific config ---
+const CONFIG = {
+	apple: {
+		serverUrl: "https://contacts.icloud.com",
+		username: process.env.APPLE_USERNAME,
+		password: process.env.APPLE_APP_PASSWORD,
+		mongoUri: process.env.APPLE_MONGODB_URI,
+		name: "iCloud",
+	},
+	google: {
+		serverUrl: "https://www.googleapis.com/.well-known/carddav",
+		username: process.env.GOOGLE_USERNAME,
+		password: process.env.GOOGLE_APP_PASSWORD,
+		mongoUri: process.env.GOOGLE_MONGODB_URI,
+		name: "Google",
+	},
+}
+
+const CURRENT_CONFIG = CONFIG[PROVIDER]
+
+// Validate credentials are present
+if (!CURRENT_CONFIG.username || !CURRENT_CONFIG.password) {
+	console.error(
+		`❌ Missing credentials for ${PROVIDER}. Check your .env file.`
+	)
+	process.exit(1)
+}
+
+// Validate MongoDB URI is present
+if (!CURRENT_CONFIG.mongoUri) {
+	console.error(
+		`❌ Missing MongoDB URI for ${PROVIDER}. Check your .env file.`
+	)
+	process.exit(1)
+}
+
 // --- Logging Utility ---
 const LOG_FILE = path.join(__dirname, "sync.log")
 
@@ -44,11 +93,13 @@ const logger = {
 // --- Connect to Mongo ---
 async function connectDB() {
 	try {
-		await mongoose.connect(process.env.MONGODB_URI, {
+		await mongoose.connect(CURRENT_CONFIG.mongoUri, {
 			serverSelectionTimeoutMS: 5000,
 			socketTimeoutMS: 45000,
 		})
-		logger.info("✅ MongoDB connected successfully")
+		logger.info(
+			`✅ MongoDB connected successfully (${CURRENT_CONFIG.name})`
+		)
 
 		// Monitor connection health
 		mongoose.connection.on("error", (err) => {
@@ -83,15 +134,15 @@ function normalizePhone(phone) {
 // --- Fetch Contacts ---
 async function fetchContacts() {
 	const startTime = Date.now()
-	logger.info("🔄 Starting iCloud contact sync...")
+	logger.info(`🔄 Starting ${CURRENT_CONFIG.name} contact sync...`)
 
 	try {
 		// Create CardDAV client
 		const client = await createDAVClient({
-			serverUrl: "https://contacts.icloud.com",
+			serverUrl: CURRENT_CONFIG.serverUrl,
 			credentials: {
-				username: process.env.APPLE_USERNAME,
-				password: process.env.APPLE_APP_PASSWORD,
+				username: CURRENT_CONFIG.username,
+				password: CURRENT_CONFIG.password,
 			},
 			authMethod: "Basic",
 			defaultAccountType: "carddav",
@@ -117,7 +168,9 @@ async function fetchContacts() {
 			}
 		}
 
-		logger.info(`Total contacts fetched from iCloud: ${contacts.length}`)
+		logger.info(
+			`Total contacts fetched from ${CURRENT_CONFIG.name}: ${contacts.length}`
+		)
 		await syncToMongo(contacts)
 
 		const duration = ((Date.now() - startTime) / 1000).toFixed(2)
@@ -174,7 +227,7 @@ async function syncToMongo(contacts) {
 	}
 
 	try {
-		// Step 0: Deduplicate contacts from iCloud
+		// Step 0: Deduplicate contacts
 		const uniqueContactsMap = new Map()
 		for (const contact of contacts) {
 			// Keep the first occurrence of each phone number
