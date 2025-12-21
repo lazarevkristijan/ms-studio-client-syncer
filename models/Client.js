@@ -10,9 +10,8 @@ const clientSchema = new mongoose.Schema(
 		},
 		phone: {
 			type: String,
-			required: true,
+			required: false,
 			trim: true,
-			unique: true,
 		},
 		notes: {
 			type: String,
@@ -30,5 +29,8 @@ const clientSchema = new mongoose.Schema(
 		timestamps: true,
 	}
 )
+
+// Create a sparse unique index on phone - allows multiple null/empty values while maintaining uniqueness for non-empty values
+clientSchema.index({ phone: 1 }, { unique: true, sparse: true })
 
 module.exports = mongoose.model("Client", clientSchema)
